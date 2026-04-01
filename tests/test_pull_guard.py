@@ -1,6 +1,8 @@
+import io
 import tempfile
 import tarfile
 import unittest
+import subprocess
 from unittest import mock
 from pathlib import Path
 
@@ -59,8 +61,9 @@ class PullGuardTests(unittest.TestCase):
         )
 
         self.assertIn("Pull Guard Terminal Dashboard", report)
-        self.assertIn("Status   : [CLEAN]", report)
+        self.assertIn("Status   :  CLEAN ", report)
         self.assertIn("No suspicious indicators were found.", report)
+        self.assertIn("Top Risks", report)
         self.assertIn("Recommendations", report)
 
     def test_terminal_report_shows_findings(self) -> None:
@@ -79,10 +82,88 @@ class PullGuardTests(unittest.TestCase):
             disable_color=True,
         )
 
-        self.assertIn("Status   : [REVIEW REQUIRED]", report)
+        self.assertIn("Status   :  REVIEW REQUIRED ", report)
         self.assertIn("HIGH RISK", report)
+        self.assertIn("Top Risks", report)
         self.assertIn("curl-pipe-shell", report)
         self.assertIn("payload.sh", report)
+
+    def test_terminal_report_collapses_excess_findings(self) -> None:
+        findings = [
+            pull_guard.Finding(
+                severity="medium",
+                scope="repo",
+                target=f"file-{index}.txt",
+                rule="suspicious-extension",
+                detail="detail",
+            )
+            for index in range(10)
+        ]
+
+        report = pull_guard.format_terminal_report(
+            findings,
+            mode_label="Repository Scan",
+            target_label="/tmp/example",
+            disable_color=True,
+            max_details=3,
+        )
+
+        self.assertIn("Collapsed Summary", report)
+        self.assertIn("Remaining 7 finding(s) are summarized here.", report)
+
+    def test_terminal_report_can_show_git_pull_status(self) -> None:
+        report = pull_guard.format_terminal_report(
+            [],
+            mode_label="Git Pull + Scan",
+            target_label="/tmp/example",
+            disable_color=True,
+            extra_header_lines=["Git Pull  : FAILED (remote unavailable, scanned existing local checkout instead)"],
+        )
+
+        self.assertIn("Git Pull  : FAILED", report)
+
+    def test_git_pull_scan_continues_when_pull_fails(self) -> None:
+        fake_pull_failure = subprocess.CompletedProcess(
+            args=["git", "-C", "/tmp/example", "pull"],
+            returncode=1,
+            stdout="",
+            stderr="Couldn't connect to server",
+        )
+        findings = [
+            pull_guard.Finding(
+                severity="medium",
+                scope="repo",
+                target="payload.com",
+                rule="suspicious-extension",
+                detail="File extension .com deserves extra review.",
+            )
+        ]
+
+        with mock.patch("pull_guard.run_command", return_value=fake_pull_failure), mock.patch(
+            "pull_guard.scan_repository",
+            return_value=findings,
+        ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout, mock.patch(
+            "sys.stderr",
+            new_callable=io.StringIO,
+        ) as stderr, mock.patch("builtins.print") as fake_print:
+            args = mock.Mock(
+                repo=".",
+                remote=None,
+                branch=None,
+                scan_only=False,
+                strict_pull=False,
+                json=False,
+                plain=False,
+                no_progress=True,
+                no_color=True,
+                max_findings=8,
+            )
+            exit_code = pull_guard.handle_git_pull(args)
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("Couldn't connect to server", stderr.getvalue())
+        rendered = "\n".join(call.args[0] for call in fake_print.call_args_list if call.args)
+        self.assertIn("Git Pull  : FAILED", rendered)
 
 
 if __name__ == "__main__":

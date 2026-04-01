@@ -30,7 +30,7 @@
 
 ## 基本用法
 
-預設會輸出終端 dashboard 版面，包含狀態卡、風險統計、依 severity 分區的 findings 和建議區塊；如果你想要舊版純文字，可加 `--plain`。
+預設會輸出終端 dashboard 版面，包含狀態卡、live progress、風險統計、依 severity 分區的 findings、折疊摘要、top risks 和建議區塊；如果你想要舊版純文字，可加 `--plain`。
 
 掃描目前 repo:
 
@@ -49,6 +49,20 @@ python3 /Users/apple/checking-git/pull_guard.py scan-repo /path/to/repo
 ```bash
 python3 /Users/apple/checking-git/pull_guard.py git-pull-scan /path/to/repo
 python3 /Users/apple/checking-git/pull_guard.py git-pull-scan /path/to/repo --remote origin --branch main
+```
+
+如果你已經 `git clone` 完，只想掃本地 repo，不想碰遠端：
+
+```bash
+python3 /Users/apple/checking-git/pull_guard.py git-pull-scan /path/to/repo --scan-only
+python3 /Users/apple/checking-git/pull_guard.py scan-repo /path/to/repo
+```
+
+在 repo 目錄內也可以直接掃目前資料夾：
+
+```bash
+gpullsafe
+python3 /Users/apple/checking-git/pull_guard.py scan-repo
 ```
 
 掃描本機 Docker image:
@@ -75,6 +89,13 @@ python3 /Users/apple/checking-git/pull_guard.py scan-repo . --json
 python3 /Users/apple/checking-git/pull_guard.py scan-repo . --plain
 ```
 
+關閉進度或調整詳細 findings 顯示數量:
+
+```bash
+python3 /Users/apple/checking-git/pull_guard.py scan-repo . --no-progress
+python3 /Users/apple/checking-git/pull_guard.py scan-repo . --max-findings 12
+```
+
 ## 回傳碼
 
 - `0`: 沒發現可疑項目
@@ -95,7 +116,14 @@ alias gpullsafe='python3 /Users/apple/checking-git/pull_guard.py git-pull-scan'
 
 ```bash
 gpullsafe /path/to/repo --remote origin --branch main
+gpullsafe
 ```
+
+`gpullsafe` 現在的行為是：
+
+- 預設先試 `git pull`
+- 如果遠端連不上，仍然會繼續掃描你目前本地已 clone 的 repo
+- 如果你完全不想碰遠端，可加 `--scan-only`
 
 ### 2. 當成安全版 docker pull
 
