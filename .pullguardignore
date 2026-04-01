@@ -1,0 +1,3 @@
+# This repo intentionally contains scanner signatures and test payloads.
+pull_guard.py
+tests/*
