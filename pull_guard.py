@@ -903,6 +903,15 @@ def pull_status_header_line(status: str, detail: str) -> str:
     return f"Git Pull  : {status} ({detail})"
 
 
+def docker_pull_status_header_line(status: str, detail: str) -> str:
+    return f"Docker Pull: {status} ({detail})"
+
+
+def image_exists_locally(image: str) -> bool:
+    completed = run_command(["docker", "image", "inspect", image], check=False)
+    return completed.returncode == 0
+
+
 def handle_repo_scan(args: argparse.Namespace) -> int:
     repo_path = Path(args.path).resolve()
     progress = progress_renderer_from_args(args)
@@ -990,12 +999,71 @@ def handle_git_pull(args: argparse.Namespace) -> int:
 
 
 def handle_docker_pull(args: argparse.Namespace) -> int:
-    completed = run_command(["docker", "pull", args.image], check=False)
-    sys.stdout.write(completed.stdout)
-    sys.stderr.write(completed.stderr)
-    if completed.returncode != 0:
-        return completed.returncode
     progress = progress_renderer_from_args(args)
+    pull_header_line: list[str] = []
+    if args.scan_only:
+        pull_header_line.append(docker_pull_status_header_line("SKIPPED", "local image scan only"))
+    else:
+        if progress.enabled:
+            progress.update(ScanProgress(phase="pull", message=f"Running docker pull for {args.image}"))
+        completed = run_command(["docker", "pull", args.image], check=False)
+        sys.stdout.write(completed.stdout)
+        sys.stderr.write(completed.stderr)
+        if completed.returncode == 0:
+            pull_header_line.append(docker_pull_status_header_line("OK", "image updated before scan"))
+            if progress.enabled:
+                progress.update(ScanProgress(phase="pull", message="docker pull completed", done=True))
+        else:
+            if image_exists_locally(args.image):
+                pull_header_line.append(
+                    docker_pull_status_header_line(
+                        "FAILED",
+                        "registry unavailable or auth denied, scanned existing local image instead",
+                    )
+                )
+                if progress.enabled:
+                    progress.update(
+                        ScanProgress(
+                            phase="pull",
+                            message="docker pull failed, continuing with local image scan",
+                            done=True,
+                        )
+                    )
+            else:
+                if progress.enabled:
+                    progress.update(
+                        ScanProgress(
+                            phase="pull",
+                            message="docker pull failed and no local image is available",
+                            done=True,
+                        )
+                    )
+                if args.strict_pull:
+                    return completed.returncode
+                print(
+                    format_terminal_report(
+                        [
+                            make_finding(
+                                "high",
+                                "image",
+                                args.image,
+                                "image-unavailable",
+                                "docker pull failed and the requested image is not present locally, so nothing could be scanned.",
+                            )
+                        ],
+                        mode_label="Docker Pull + Scan",
+                        target_label=args.image,
+                        disable_color=args.no_color,
+                        max_details=args.max_findings,
+                        extra_header_lines=[
+                            docker_pull_status_header_line(
+                                "FAILED",
+                                "registry unavailable or auth denied, and no local image was found",
+                            )
+                        ],
+                    )
+                )
+                return completed.returncode
     findings = scan_docker_image(args.image, progress=progress.update if progress.enabled else None)
     if progress.enabled:
         progress.finish("Docker pull scan complete")
@@ -1007,6 +1075,7 @@ def handle_docker_pull(args: argparse.Namespace) -> int:
         target_label=args.image,
         disable_color=args.no_color,
         max_details=args.max_findings,
+        extra_header_lines=pull_header_line,
     )
 
 
@@ -1050,6 +1119,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     docker_pull = subparsers.add_parser("docker-pull-scan", help="Run docker pull and then scan the image.")
     docker_pull.add_argument("image", help="Docker image reference.")
+    docker_pull.add_argument("--scan-only", action="store_true", help="Skip docker pull and only scan the local image.")
+    docker_pull.add_argument("--strict-pull", action="store_true", help="Abort if docker pull fails instead of continuing with a local image scan.")
     add_output_flags(docker_pull)
     docker_pull.set_defaults(func=handle_docker_pull)
 

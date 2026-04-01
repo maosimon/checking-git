@@ -77,6 +77,13 @@ python3 /Users/apple/checking-git/pull_guard.py scan-image nginx:1.17.3-alpine
 python3 /Users/apple/checking-git/pull_guard.py docker-pull-scan nginx:1.17.3-alpine
 ```
 
+如果 image 早就已經 pull 到本機，只想離線掃本地 image：
+
+```bash
+python3 /Users/apple/checking-git/pull_guard.py docker-pull-scan nginx:1.17.3-alpine --scan-only
+python3 /Users/apple/checking-git/pull_guard.py scan-image nginx:1.17.3-alpine
+```
+
 輸出 JSON:
 
 ```bash
@@ -135,7 +142,14 @@ alias dpullsafe='python3 /Users/apple/checking-git/pull_guard.py docker-pull-sca
 
 ```bash
 dpullsafe nginx:1.17.3-alpine
+dpullsafe nginx:1.17.3-alpine --scan-only
 ```
+
+`dpullsafe` 現在的行為是：
+
+- 預設先試 `docker pull`
+- 如果 registry 需要登入、白名單擋住、或當下沒網路，只要本機已有這個 image，仍然會繼續掃描本地 image
+- 如果你完全不想連網，可加 `--scan-only`
 
 ### 3. 接到 git hook
 

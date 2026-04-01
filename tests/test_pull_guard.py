@@ -165,6 +165,49 @@ class PullGuardTests(unittest.TestCase):
         rendered = "\n".join(call.args[0] for call in fake_print.call_args_list if call.args)
         self.assertIn("Git Pull  : FAILED", rendered)
 
+    def test_docker_pull_scan_continues_when_pull_fails_but_local_image_exists(self) -> None:
+        fake_pull_failure = subprocess.CompletedProcess(
+            args=["docker", "pull", "example:latest"],
+            returncode=1,
+            stdout="",
+            stderr="pull access denied",
+        )
+        findings = [
+            pull_guard.Finding(
+                severity="medium",
+                scope="image",
+                target="example:latest",
+                rule="suspicious-extension",
+                detail="Image contains a file with extension .com.",
+            )
+        ]
+
+        with mock.patch("pull_guard.run_command", return_value=fake_pull_failure), mock.patch(
+            "pull_guard.image_exists_locally",
+            return_value=True,
+        ), mock.patch("pull_guard.scan_docker_image", return_value=findings), mock.patch(
+            "sys.stdout",
+            new_callable=io.StringIO,
+        ) as stdout, mock.patch("sys.stderr", new_callable=io.StringIO) as stderr, mock.patch(
+            "builtins.print"
+        ) as fake_print:
+            args = mock.Mock(
+                image="example:latest",
+                scan_only=False,
+                strict_pull=False,
+                json=False,
+                plain=False,
+                no_progress=True,
+                no_color=True,
+                max_findings=8,
+            )
+            exit_code = pull_guard.handle_docker_pull(args)
+
+        self.assertEqual(exit_code, 1)
+        self.assertIn("pull access denied", stderr.getvalue())
+        rendered = "\n".join(call.args[0] for call in fake_print.call_args_list if call.args)
+        self.assertIn("Docker Pull: FAILED", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()
