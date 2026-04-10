@@ -2,6 +2,130 @@
 
 `Pull Guard` 是一個本機掃描工具，目標是讓你在 `git pull` 或 `docker pull` 之後，立即做一次惡意檔案與可疑行為檢查。
 
+## 指令速查表
+
+### 掃本地 Git repo
+
+已經 `git clone` 完，只想掃本地 repo，不碰遠端：
+
+```bash
+cd /path/to/repo
+gpullsafe --scan-only
+```
+
+指定路徑掃描：
+
+```bash
+gpullsafe /path/to/repo --scan-only
+python3 /Users/apple/checking-git/pull_guard.py scan-repo /path/to/repo
+```
+
+想先試 `git pull`，失敗也照樣掃本地：
+
+```bash
+gpullsafe
+gpullsafe /path/to/repo
+```
+
+### 掃本地 Docker image
+
+image 已經 pull 到本機，只想離線掃描：
+
+```bash
+dpullsafe nginx:1.17.3-alpine --scan-only
+python3 /Users/apple/checking-git/pull_guard.py scan-image nginx:1.17.3-alpine
+```
+
+想先試 `docker pull`，失敗就 fallback 掃本地 image：
+
+```bash
+dpullsafe nginx:1.17.3-alpine
+```
+
+### 常用參數
+
+只掃本地，不碰遠端：
+
+```bash
+--scan-only
+```
+
+跳過漏洞掃描，只做惡意檔案 / 可疑行為掃描：
+
+```bash
+--skip-vuln-scan
+```
+
+不要顯示進度列：
+
+```bash
+--no-progress
+```
+
+不要顯示顏色：
+
+```bash
+--no-color
+```
+
+改成純文字輸出：
+
+```bash
+--plain
+```
+
+輸出 JSON：
+
+```bash
+--json
+```
+
+控制 dashboard 詳細列出幾筆 findings：
+
+```bash
+--max-findings 10
+```
+
+### 資料庫更新
+
+更新 ClamAV 病毒碼：
+
+```bash
+/Users/apple/checking-git/scripts/update_clamav_db.sh
+```
+
+更新 Trivy 漏洞資料庫：
+
+```bash
+/Users/apple/checking-git/scripts/update_trivy_db.sh
+```
+
+### 最常用組合
+
+repo 本地安全掃描：
+
+```bash
+gpullsafe --scan-only
+```
+
+image 本地安全掃描：
+
+```bash
+dpullsafe your-image:tag --scan-only
+```
+
+repo 掃描但不做漏洞掃描：
+
+```bash
+gpullsafe --scan-only --skip-vuln-scan
+```
+
+image 掃描輸出 JSON：
+
+```bash
+dpullsafe your-image:tag --scan-only --json
+```
+
 它目前提供兩種能力：
 
 1. 內建啟發式掃描
