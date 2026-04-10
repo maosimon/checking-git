@@ -175,6 +175,7 @@ class TerminalProgressRenderer:
             "pull": "Pull",
             "inventory": "Inventory",
             "scan": "Heuristic",
+            "vuln": "Vuln",
             "history": "History",
             "export": "Export",
             "filesystem": "Filesystem",
@@ -420,7 +421,105 @@ def repository_scan_paths(repo_path: Path) -> list[Path]:
     ]
 
 
-def scan_repository(repo_path: Path, progress: ProgressCallback | None = None) -> list[Finding]:
+def vulnerability_scanner_name() -> str | None:
+    if shutil.which("trivy") is not None:
+        return "trivy"
+    return None
+
+
+def vulnerability_status_header_line() -> str:
+    scanner = vulnerability_scanner_name()
+    if scanner is None:
+        return "Vuln Scan : DISABLED (install trivy to enable local CVE scanning)"
+    return f"Vuln Scan : ENABLED ({scanner}, local vulnerability DB)"
+
+
+def vulnerability_severity_to_finding(severity: str) -> str:
+    normalized = severity.strip().upper()
+    if normalized in {"CRITICAL", "HIGH"}:
+        return "high"
+    if normalized == "MEDIUM":
+        return "medium"
+    return "low"
+
+
+def parse_trivy_vulnerabilities(payload: dict, scope: str) -> list[Finding]:
+    findings: list[Finding] = []
+    for result in payload.get("Results", []):
+        target = result.get("Target", "unknown-target")
+        vuln_type = result.get("Type") or result.get("Class") or "unknown"
+        for vulnerability in result.get("Vulnerabilities", []) or []:
+            vuln_id = vulnerability.get("VulnerabilityID", "unknown-vuln")
+            pkg_name = vulnerability.get("PkgName", "unknown-package")
+            installed = vulnerability.get("InstalledVersion", "unknown")
+            fixed = vulnerability.get("FixedVersion") or "unfixed"
+            severity = vulnerability_severity_to_finding(vulnerability.get("Severity", "LOW"))
+            title = vulnerability.get("Title") or vulnerability.get("PrimaryURL") or "Known vulnerability detected."
+            findings.append(
+                make_finding(
+                    severity,
+                    scope,
+                    f"{target} :: {pkg_name}",
+                    vuln_id,
+                    f"[{vuln_type}] installed={installed} fixed={fixed} :: {title}",
+                )
+            )
+    return findings
+
+
+def run_trivy_scan(scan_mode: str, target: str, scope: str, progress: ProgressCallback | None = None) -> list[Finding]:
+    scanner = vulnerability_scanner_name()
+    if scanner is None:
+        return []
+
+    emit_progress(progress, "vuln", f"Running vulnerability scan on {target}")
+    completed = run_command(
+        [
+            "trivy",
+            scan_mode,
+            "--scanners",
+            "vuln",
+            "--format",
+            "json",
+            "--quiet",
+            "--offline-scan",
+            "--skip-db-update",
+            target,
+        ],
+        check=False,
+    )
+    if completed.returncode not in {0, 5}:
+        emit_progress(progress, "vuln", f"Vulnerability scan could not complete for {target}", done=True)
+        detail = completed.stderr.strip() or completed.stdout.strip() or "Trivy vulnerability scan failed."
+        return [
+            make_finding(
+                "low",
+                scope,
+                target,
+                "vuln-scan-error",
+                detail,
+            )
+        ]
+
+    if not completed.stdout.strip():
+        emit_progress(progress, "vuln", f"Finished vulnerability scan on {target}", done=True)
+        return []
+
+    payload = json.loads(completed.stdout)
+    findings = parse_trivy_vulnerabilities(payload, scope)
+    emit_progress(progress, "vuln", f"Finished vulnerability scan on {target}", done=True)
+    return findings
+
+
+def scan_repository_vulnerabilities(repo_path: Path, progress: ProgressCallback | None = None) -> list[Finding]:
+    return run_trivy_scan("fs", str(repo_path), "repo-vuln", progress=progress)
+
+
+def scan_image_vulnerabilities(image: str, progress: ProgressCallback | None = None) -> list[Finding]:
+    return run_trivy_scan("image", image, "image-vuln", progress=progress)
+
+
+def scan_repository(repo_path: Path, progress: ProgressCallback | None = None, include_vuln_scan: bool = True) -> list[Finding]:
     repo_path = repo_path.resolve()
     ignore_patterns = load_ignore_patterns(repo_path)
     emit_progress(progress, "inventory", f"Collecting files from {repo_path}")
@@ -442,6 +541,8 @@ def scan_repository(repo_path: Path, progress: ProgressCallback | None = None) -
             emit_progress(progress, "scan", f"Scanning repository contents: {relpath}", current=index, total=total_paths)
     emit_progress(progress, "scan", "Repository heuristic scan finished", current=total_paths, total=total_paths, done=True)
     findings.extend(run_clamscan(repo_path, "repo", progress=progress))
+    if include_vuln_scan:
+        findings.extend(scan_repository_vulnerabilities(repo_path, progress=progress))
     return deduplicate_findings(findings)
 
 
@@ -573,9 +674,11 @@ def scan_image_filesystem(image: str, progress: ProgressCallback | None = None) 
     return findings
 
 
-def scan_docker_image(image: str, progress: ProgressCallback | None = None) -> list[Finding]:
+def scan_docker_image(image: str, progress: ProgressCallback | None = None, include_vuln_scan: bool = True) -> list[Finding]:
     findings = scan_docker_history(image, progress=progress)
     findings.extend(scan_image_filesystem(image, progress=progress))
+    if include_vuln_scan:
+        findings.extend(scan_image_vulnerabilities(image, progress=progress))
     return deduplicate_findings(findings)
 
 
@@ -797,6 +900,7 @@ def recommendation_lines(findings: list[Finding]) -> list[str]:
         return [
             "No immediate action required.",
             "Keep ClamAV signatures updated with scripts/update_clamav_db.sh.",
+            "Keep Trivy's vulnerability DB updated with scripts/update_trivy_db.sh.",
             "Use --json if you want to export results to other tools.",
         ]
 
@@ -809,6 +913,8 @@ def recommendation_lines(findings: list[Finding]) -> list[str]:
         lines.append("LOW findings are informational, but still worth checking if they are unexpected.")
     if not lines:
         lines.append("Review the findings list before executing pulled code or images.")
+    if any(item.scope in {"repo-vuln", "image-vuln"} for item in findings):
+        lines.append("Patch or rebuild components that have fixed versions available in the vulnerability findings.")
     lines.append("Re-run with --json if you want machine-readable output for logging or CI.")
     return lines
 
@@ -833,6 +939,7 @@ def format_terminal_report(
         f"Target   : {target_label}",
         f"Generated: {generated_at_text()}",
         f"ClamAV   : {'ENABLED' if clamav_path else 'DISABLED'}" + (f" ({clamav_path})" if clamav_path else ""),
+        vulnerability_status_header_line(),
     ]
     if extra_header_lines:
         header_lines.extend(extra_header_lines)
@@ -915,7 +1022,11 @@ def image_exists_locally(image: str) -> bool:
 def handle_repo_scan(args: argparse.Namespace) -> int:
     repo_path = Path(args.path).resolve()
     progress = progress_renderer_from_args(args)
-    findings = scan_repository(repo_path, progress=progress.update if progress.enabled else None)
+    findings = scan_repository(
+        repo_path,
+        progress=progress.update if progress.enabled else None,
+        include_vuln_scan=not args.skip_vuln_scan,
+    )
     if progress.enabled:
         progress.finish("Repository scan complete")
     return render_report(
@@ -931,7 +1042,11 @@ def handle_repo_scan(args: argparse.Namespace) -> int:
 
 def handle_image_scan(args: argparse.Namespace) -> int:
     progress = progress_renderer_from_args(args)
-    findings = scan_docker_image(args.image, progress=progress.update if progress.enabled else None)
+    findings = scan_docker_image(
+        args.image,
+        progress=progress.update if progress.enabled else None,
+        include_vuln_scan=not args.skip_vuln_scan,
+    )
     if progress.enabled:
         progress.finish("Docker image scan complete")
     return render_report(
@@ -983,7 +1098,11 @@ def handle_git_pull(args: argparse.Namespace) -> int:
                 )
             if args.strict_pull:
                 return completed.returncode
-    findings = scan_repository(repo_path, progress=progress.update if progress.enabled else None)
+    findings = scan_repository(
+        repo_path,
+        progress=progress.update if progress.enabled else None,
+        include_vuln_scan=not args.skip_vuln_scan,
+    )
     if progress.enabled:
         progress.finish("Git pull scan complete")
     return render_report(
@@ -1064,7 +1183,11 @@ def handle_docker_pull(args: argparse.Namespace) -> int:
                     )
                 )
                 return completed.returncode
-    findings = scan_docker_image(args.image, progress=progress.update if progress.enabled else None)
+    findings = scan_docker_image(
+        args.image,
+        progress=progress.update if progress.enabled else None,
+        include_vuln_scan=not args.skip_vuln_scan,
+    )
     if progress.enabled:
         progress.finish("Docker pull scan complete")
     return render_report(
@@ -1090,6 +1213,7 @@ def add_output_flags(parser: argparse.ArgumentParser) -> None:
         default=8,
         help="Maximum number of detailed findings to expand before collapsing the rest into a summary.",
     )
+    parser.add_argument("--skip-vuln-scan", action="store_true", help="Skip Trivy-based vulnerability scanning.")
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -6,6 +6,7 @@
 
 1. 內建啟發式掃描
 2. 若系統有安裝 `clamscan`，自動串接 ClamAV 再掃一次
+3. 若系統有安裝 `trivy`，自動做本地漏洞掃描
 
 這不是完整 EDR，也不是雲端沙箱，但很適合拿來做「拉下來先過一遍」的第一道防線。
 
@@ -21,6 +22,8 @@
 - 可疑副檔名
 - repo 外部 symlink
 - image 中的 setuid / cron / `authorized_keys` / `ld.so.preload`
+- repo 依賴套件與 lockfile 的已知漏洞
+- docker image 內 OS / 套件的已知 CVE
 
 ## 檔案
 
@@ -101,6 +104,7 @@ python3 /Users/apple/checking-git/pull_guard.py scan-repo . --plain
 ```bash
 python3 /Users/apple/checking-git/pull_guard.py scan-repo . --no-progress
 python3 /Users/apple/checking-git/pull_guard.py scan-repo . --max-findings 12
+python3 /Users/apple/checking-git/pull_guard.py scan-repo . --skip-vuln-scan
 ```
 
 ## 回傳碼
@@ -211,6 +215,37 @@ sudo brew services start clamav
 
 - `clamscan` 指令可用
 - 病毒碼已透過 `freshclam` 更新
+
+## 安裝 Trivy
+
+若你要啟用本地漏洞掃描，可先安裝 Trivy：
+
+```bash
+/Users/apple/checking-git/scripts/install_trivy_homebrew.sh
+/Users/apple/checking-git/scripts/update_trivy_db.sh
+```
+
+或手動：
+
+```bash
+brew install trivy
+trivy image --download-db-only
+trivy image --download-java-db-only
+```
+
+安裝後 `Pull Guard` 會自動把 Trivy 接進 repo / docker image 掃描流程，而且預設使用本地 DB，不會每次掃描都去聯網更新。
+
+如果你想純本地離線掃描：
+
+```bash
+gpullsafe --scan-only
+dpullsafe nginx:1.17.3-alpine --scan-only
+```
+
+前提是：
+
+- 該 repo / image 已經在本機
+- Trivy DB 已經事先更新過
 
 ## 測試
 

@@ -38,7 +38,10 @@ class PullGuardTests(unittest.TestCase):
             source = repo / "main.py"
             source.write_text("print('hello world')\n", encoding="utf-8")
 
-            with mock.patch("pull_guard.run_clamscan", return_value=[]):
+            with mock.patch("pull_guard.run_clamscan", return_value=[]), mock.patch(
+                "pull_guard.scan_repository_vulnerabilities",
+                return_value=[],
+            ):
                 findings = pull_guard.scan_repository(repo)
 
             self.assertEqual(findings, [])
@@ -53,34 +56,37 @@ class PullGuardTests(unittest.TestCase):
         self.assertEqual(findings, [])
 
     def test_terminal_report_shows_clean_status(self) -> None:
-        report = pull_guard.format_terminal_report(
-            [],
-            mode_label="Repository Scan",
-            target_label="/tmp/example",
-            disable_color=True,
-        )
+        with mock.patch("pull_guard.vulnerability_status_header_line", return_value="Vuln Scan : DISABLED"):
+            report = pull_guard.format_terminal_report(
+                [],
+                mode_label="Repository Scan",
+                target_label="/tmp/example",
+                disable_color=True,
+            )
 
         self.assertIn("Pull Guard Terminal Dashboard", report)
         self.assertIn("Status   :  CLEAN ", report)
         self.assertIn("No suspicious indicators were found.", report)
+        self.assertIn("Vuln Scan : DISABLED", report)
         self.assertIn("Top Risks", report)
         self.assertIn("Recommendations", report)
 
     def test_terminal_report_shows_findings(self) -> None:
-        report = pull_guard.format_terminal_report(
-            [
-                pull_guard.Finding(
-                    severity="high",
-                    scope="repo",
-                    target="payload.sh",
-                    rule="curl-pipe-shell",
-                    detail="Detected curl piped directly into a shell.",
-                )
-            ],
-            mode_label="Repository Scan",
-            target_label="/tmp/example",
-            disable_color=True,
-        )
+        with mock.patch("pull_guard.vulnerability_status_header_line", return_value="Vuln Scan : ENABLED (trivy, local vulnerability DB)"):
+            report = pull_guard.format_terminal_report(
+                [
+                    pull_guard.Finding(
+                        severity="high",
+                        scope="repo",
+                        target="payload.sh",
+                        rule="curl-pipe-shell",
+                        detail="Detected curl piped directly into a shell.",
+                    )
+                ],
+                mode_label="Repository Scan",
+                target_label="/tmp/example",
+                disable_color=True,
+            )
 
         self.assertIn("Status   :  REVIEW REQUIRED ", report)
         self.assertIn("HIGH RISK", report)
@@ -100,25 +106,27 @@ class PullGuardTests(unittest.TestCase):
             for index in range(10)
         ]
 
-        report = pull_guard.format_terminal_report(
-            findings,
-            mode_label="Repository Scan",
-            target_label="/tmp/example",
-            disable_color=True,
-            max_details=3,
-        )
+        with mock.patch("pull_guard.vulnerability_status_header_line", return_value="Vuln Scan : DISABLED"):
+            report = pull_guard.format_terminal_report(
+                findings,
+                mode_label="Repository Scan",
+                target_label="/tmp/example",
+                disable_color=True,
+                max_details=3,
+            )
 
         self.assertIn("Collapsed Summary", report)
         self.assertIn("Remaining 7 finding(s) are summarized here.", report)
 
     def test_terminal_report_can_show_git_pull_status(self) -> None:
-        report = pull_guard.format_terminal_report(
-            [],
-            mode_label="Git Pull + Scan",
-            target_label="/tmp/example",
-            disable_color=True,
-            extra_header_lines=["Git Pull  : FAILED (remote unavailable, scanned existing local checkout instead)"],
-        )
+        with mock.patch("pull_guard.vulnerability_status_header_line", return_value="Vuln Scan : DISABLED"):
+            report = pull_guard.format_terminal_report(
+                [],
+                mode_label="Git Pull + Scan",
+                target_label="/tmp/example",
+                disable_color=True,
+                extra_header_lines=["Git Pull  : FAILED (remote unavailable, scanned existing local checkout instead)"],
+            )
 
         self.assertIn("Git Pull  : FAILED", report)
 
@@ -207,6 +215,33 @@ class PullGuardTests(unittest.TestCase):
         self.assertIn("pull access denied", stderr.getvalue())
         rendered = "\n".join(call.args[0] for call in fake_print.call_args_list if call.args)
         self.assertIn("Docker Pull: FAILED", rendered)
+
+    def test_parse_trivy_vulnerabilities_maps_to_findings(self) -> None:
+        payload = {
+            "Results": [
+                {
+                    "Target": "requirements.txt",
+                    "Type": "pip",
+                    "Vulnerabilities": [
+                        {
+                            "VulnerabilityID": "CVE-2026-0001",
+                            "PkgName": "requests",
+                            "InstalledVersion": "1.0.0",
+                            "FixedVersion": "1.0.1",
+                            "Severity": "HIGH",
+                            "Title": "Example vulnerability",
+                        }
+                    ],
+                }
+            ]
+        }
+
+        findings = pull_guard.parse_trivy_vulnerabilities(payload, "repo-vuln")
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].rule, "CVE-2026-0001")
+        self.assertEqual(findings[0].severity, "high")
+        self.assertEqual(findings[0].scope, "repo-vuln")
 
 
 if __name__ == "__main__":
