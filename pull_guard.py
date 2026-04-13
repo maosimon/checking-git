@@ -14,7 +14,7 @@ import sys
 import tarfile
 import tempfile
 import textwrap
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable, Iterable
@@ -443,12 +443,39 @@ def vulnerability_severity_to_finding(severity: str) -> str:
     return "low"
 
 
-def parse_trivy_vulnerabilities(payload: dict, scope: str) -> list[Finding]:
+def parse_published_date(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def vulnerability_is_old_enough(vulnerability: dict, min_age_days: int) -> bool:
+    if min_age_days <= 0:
+        return True
+    published = parse_published_date(vulnerability.get("PublishedDate"))
+    if published is None:
+        return True
+    cutoff = datetime.now().astimezone(published.tzinfo) - timedelta(days=min_age_days)
+    return published <= cutoff
+
+
+def vuln_filter_status_header_line(min_age_days: int) -> str:
+    if min_age_days <= 0:
+        return "Vuln Age : DISABLED (showing all published CVEs)"
+    return f"Vuln Age : ENABLED (showing CVEs published at least {min_age_days} days ago)"
+
+
+def parse_trivy_vulnerabilities(payload: dict, scope: str, min_age_days: int = 180) -> list[Finding]:
     findings: list[Finding] = []
     for result in payload.get("Results", []):
         target = result.get("Target", "unknown-target")
         vuln_type = result.get("Type") or result.get("Class") or "unknown"
         for vulnerability in result.get("Vulnerabilities", []) or []:
+            if not vulnerability_is_old_enough(vulnerability, min_age_days):
+                continue
             vuln_id = vulnerability.get("VulnerabilityID", "unknown-vuln")
             pkg_name = vulnerability.get("PkgName", "unknown-package")
             installed = vulnerability.get("InstalledVersion", "unknown")
@@ -467,7 +494,13 @@ def parse_trivy_vulnerabilities(payload: dict, scope: str) -> list[Finding]:
     return findings
 
 
-def run_trivy_scan(scan_mode: str, target: str, scope: str, progress: ProgressCallback | None = None) -> list[Finding]:
+def run_trivy_scan(
+    scan_mode: str,
+    target: str,
+    scope: str,
+    progress: ProgressCallback | None = None,
+    min_age_days: int = 180,
+) -> list[Finding]:
     scanner = vulnerability_scanner_name()
     if scanner is None:
         return []
@@ -506,20 +539,25 @@ def run_trivy_scan(scan_mode: str, target: str, scope: str, progress: ProgressCa
         return []
 
     payload = json.loads(completed.stdout)
-    findings = parse_trivy_vulnerabilities(payload, scope)
+    findings = parse_trivy_vulnerabilities(payload, scope, min_age_days=min_age_days)
     emit_progress(progress, "vuln", f"Finished vulnerability scan on {target}", done=True)
     return findings
 
 
-def scan_repository_vulnerabilities(repo_path: Path, progress: ProgressCallback | None = None) -> list[Finding]:
-    return run_trivy_scan("fs", str(repo_path), "repo-vuln", progress=progress)
+def scan_repository_vulnerabilities(repo_path: Path, progress: ProgressCallback | None = None, min_age_days: int = 180) -> list[Finding]:
+    return run_trivy_scan("fs", str(repo_path), "repo-vuln", progress=progress, min_age_days=min_age_days)
 
 
-def scan_image_vulnerabilities(image: str, progress: ProgressCallback | None = None) -> list[Finding]:
-    return run_trivy_scan("image", image, "image-vuln", progress=progress)
+def scan_image_vulnerabilities(image: str, progress: ProgressCallback | None = None, min_age_days: int = 180) -> list[Finding]:
+    return run_trivy_scan("image", image, "image-vuln", progress=progress, min_age_days=min_age_days)
 
 
-def scan_repository(repo_path: Path, progress: ProgressCallback | None = None, include_vuln_scan: bool = True) -> list[Finding]:
+def scan_repository(
+    repo_path: Path,
+    progress: ProgressCallback | None = None,
+    include_vuln_scan: bool = True,
+    vuln_min_age_days: int = 180,
+) -> list[Finding]:
     repo_path = repo_path.resolve()
     ignore_patterns = load_ignore_patterns(repo_path)
     emit_progress(progress, "inventory", f"Collecting files from {repo_path}")
@@ -542,7 +580,7 @@ def scan_repository(repo_path: Path, progress: ProgressCallback | None = None, i
     emit_progress(progress, "scan", "Repository heuristic scan finished", current=total_paths, total=total_paths, done=True)
     findings.extend(run_clamscan(repo_path, "repo", progress=progress))
     if include_vuln_scan:
-        findings.extend(scan_repository_vulnerabilities(repo_path, progress=progress))
+        findings.extend(scan_repository_vulnerabilities(repo_path, progress=progress, min_age_days=vuln_min_age_days))
     return deduplicate_findings(findings)
 
 
@@ -674,11 +712,16 @@ def scan_image_filesystem(image: str, progress: ProgressCallback | None = None) 
     return findings
 
 
-def scan_docker_image(image: str, progress: ProgressCallback | None = None, include_vuln_scan: bool = True) -> list[Finding]:
+def scan_docker_image(
+    image: str,
+    progress: ProgressCallback | None = None,
+    include_vuln_scan: bool = True,
+    vuln_min_age_days: int = 180,
+) -> list[Finding]:
     findings = scan_docker_history(image, progress=progress)
     findings.extend(scan_image_filesystem(image, progress=progress))
     if include_vuln_scan:
-        findings.extend(scan_image_vulnerabilities(image, progress=progress))
+        findings.extend(scan_image_vulnerabilities(image, progress=progress, min_age_days=vuln_min_age_days))
     return deduplicate_findings(findings)
 
 
@@ -1026,6 +1069,7 @@ def handle_repo_scan(args: argparse.Namespace) -> int:
         repo_path,
         progress=progress.update if progress.enabled else None,
         include_vuln_scan=not args.skip_vuln_scan,
+        vuln_min_age_days=args.vuln_min_age_days,
     )
     if progress.enabled:
         progress.finish("Repository scan complete")
@@ -1037,6 +1081,7 @@ def handle_repo_scan(args: argparse.Namespace) -> int:
         target_label=str(repo_path),
         disable_color=args.no_color,
         max_details=args.max_findings,
+        extra_header_lines=[vuln_filter_status_header_line(args.vuln_min_age_days)],
     )
 
 
@@ -1046,6 +1091,7 @@ def handle_image_scan(args: argparse.Namespace) -> int:
         args.image,
         progress=progress.update if progress.enabled else None,
         include_vuln_scan=not args.skip_vuln_scan,
+        vuln_min_age_days=args.vuln_min_age_days,
     )
     if progress.enabled:
         progress.finish("Docker image scan complete")
@@ -1057,6 +1103,7 @@ def handle_image_scan(args: argparse.Namespace) -> int:
         target_label=args.image,
         disable_color=args.no_color,
         max_details=args.max_findings,
+        extra_header_lines=[vuln_filter_status_header_line(args.vuln_min_age_days)],
     )
 
 
@@ -1102,6 +1149,7 @@ def handle_git_pull(args: argparse.Namespace) -> int:
         repo_path,
         progress=progress.update if progress.enabled else None,
         include_vuln_scan=not args.skip_vuln_scan,
+        vuln_min_age_days=args.vuln_min_age_days,
     )
     if progress.enabled:
         progress.finish("Git pull scan complete")
@@ -1113,7 +1161,7 @@ def handle_git_pull(args: argparse.Namespace) -> int:
         target_label=str(repo_path),
         disable_color=args.no_color,
         max_details=args.max_findings,
-        extra_header_lines=pull_header_line,
+        extra_header_lines=pull_header_line + [vuln_filter_status_header_line(args.vuln_min_age_days)],
     )
 
 
@@ -1187,6 +1235,7 @@ def handle_docker_pull(args: argparse.Namespace) -> int:
         args.image,
         progress=progress.update if progress.enabled else None,
         include_vuln_scan=not args.skip_vuln_scan,
+        vuln_min_age_days=args.vuln_min_age_days,
     )
     if progress.enabled:
         progress.finish("Docker pull scan complete")
@@ -1198,7 +1247,7 @@ def handle_docker_pull(args: argparse.Namespace) -> int:
         target_label=args.image,
         disable_color=args.no_color,
         max_details=args.max_findings,
-        extra_header_lines=pull_header_line,
+        extra_header_lines=pull_header_line + [vuln_filter_status_header_line(args.vuln_min_age_days)],
     )
 
 
@@ -1214,6 +1263,12 @@ def add_output_flags(parser: argparse.ArgumentParser) -> None:
         help="Maximum number of detailed findings to expand before collapsing the rest into a summary.",
     )
     parser.add_argument("--skip-vuln-scan", action="store_true", help="Skip Trivy-based vulnerability scanning.")
+    parser.add_argument(
+        "--vuln-min-age-days",
+        type=int,
+        default=180,
+        help="Only show vulnerabilities published at least this many days ago. Use 0 to show all CVEs.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -165,6 +165,7 @@ class PullGuardTests(unittest.TestCase):
                 no_progress=True,
                 no_color=True,
                 max_findings=8,
+                vuln_min_age_days=180,
             )
             exit_code = pull_guard.handle_git_pull(args)
 
@@ -208,6 +209,7 @@ class PullGuardTests(unittest.TestCase):
                 no_progress=True,
                 no_color=True,
                 max_findings=8,
+                vuln_min_age_days=180,
             )
             exit_code = pull_guard.handle_docker_pull(args)
 
@@ -242,6 +244,41 @@ class PullGuardTests(unittest.TestCase):
         self.assertEqual(findings[0].rule, "CVE-2026-0001")
         self.assertEqual(findings[0].severity, "high")
         self.assertEqual(findings[0].scope, "repo-vuln")
+
+    def test_parse_trivy_vulnerabilities_filters_recent_cves(self) -> None:
+        payload = {
+            "Results": [
+                {
+                    "Target": "requirements.txt",
+                    "Type": "pip",
+                    "Vulnerabilities": [
+                        {
+                            "VulnerabilityID": "CVE-2026-9999",
+                            "PkgName": "demo",
+                            "InstalledVersion": "1.0.0",
+                            "FixedVersion": "1.0.1",
+                            "Severity": "HIGH",
+                            "Title": "Recent vulnerability",
+                            "PublishedDate": "2026-04-05T00:00:00Z",
+                        },
+                        {
+                            "VulnerabilityID": "CVE-2024-1111",
+                            "PkgName": "demo",
+                            "InstalledVersion": "1.0.0",
+                            "FixedVersion": "1.0.1",
+                            "Severity": "MEDIUM",
+                            "Title": "Older vulnerability",
+                            "PublishedDate": "2024-01-01T00:00:00Z",
+                        },
+                    ],
+                }
+            ]
+        }
+
+        findings = pull_guard.parse_trivy_vulnerabilities(payload, "repo-vuln", min_age_days=180)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].rule, "CVE-2024-1111")
 
 
 if __name__ == "__main__":

@@ -56,6 +56,12 @@ dpullsafe nginx:1.17.3-alpine
 --skip-vuln-scan
 ```
 
+只顯示發布超過指定天數的漏洞，避免太新的 CVE：
+
+```bash
+--vuln-min-age-days 180
+```
+
 不要顯示進度列：
 
 ```bash
@@ -126,6 +132,13 @@ image 掃描輸出 JSON：
 dpullsafe your-image:tag --scan-only --json
 ```
 
+只看較舊、較適合安排修補的漏洞：
+
+```bash
+gpullsafe --scan-only --vuln-min-age-days 180
+dpullsafe your-image:tag --scan-only --vuln-min-age-days 180
+```
+
 它目前提供兩種能力：
 
 1. 內建啟發式掃描
@@ -158,6 +171,8 @@ dpullsafe your-image:tag --scan-only --json
 ## 基本用法
 
 預設會輸出終端 dashboard 版面，包含狀態卡、live progress、風險統計、依 severity 分區的 findings、折疊摘要、top risks 和建議區塊；如果你想要舊版純文字，可加 `--plain`。
+
+漏洞掃描預設只顯示「發布至少 180 天」的 CVE，避免把太新的漏洞全部塞進報表；如果你想看全部，可加 `--vuln-min-age-days 0`。
 
 掃描目前 repo:
 
